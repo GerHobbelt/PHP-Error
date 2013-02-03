@@ -546,6 +546,15 @@
                 return PHP_SAPI === 'cli';
             }
             
+            private static function isBinaryRequest() {
+                $response = ErrorHandler::getResponseHeaders();
+                foreach ( $response as $key => $value ) {
+                    if ( strtolower($key) === 'content-transfer-encoding' ) {
+                      return strtolower($value) === 'binary';
+                    }
+                }
+            }
+
             /**
              * This attempts to state if this is *not* a PHP request,
              * but it cannot say if it *is* a PHP request. It achieves
@@ -1529,9 +1538,10 @@
 
                     if ( 
                             $this->isDisplayingErrors() &&
-                            !$this->isAjax &&
-                             $this->catchAjaxErrors &&
-                            (!$this->htmlOnly || !ErrorHandler::isNonPHPRequest())
+                        !$this->isAjax &&
+                         $this->catchAjaxErrors &&
+                         (!$this->htmlOnly || !ErrorHandler::isNonPHPRequest()) &&
+                         !ErrorHandler::isBinaryRequest()
                     ) {
                         $content  = ob_get_contents();
                         ob_clean();
@@ -3268,6 +3278,7 @@
                     $requestUrl = $_SERVER['REQUEST_URI'];
                 }
 
+                header_remove('Content-Transfer-Encoding');
                 $this->displayHTML(
                         // pre, in the head
                         function() use( $message, $errFile, $errLine ) {
