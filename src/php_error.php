@@ -3529,8 +3529,8 @@
 
                     h2,
                     .background {
-                        font-size: 16px;
-                        font-family: inconsolata, 'Droid Sans Mono', "DejaVu Sans Mono", consolas, monospace;
+                        font-size: 11pt;
+                        font-family: consolas, inconsolata, 'Droid Sans Mono', "DejaVu Sans Mono", monospace;
                     }
 
                     h1,
