@@ -1388,7 +1388,16 @@
                 return ini_get('display_errors') === '1';
             }
             
-            /**
+            
+            /** @return self */
+            public function catchAjaxErrors($catchAjaxErrors = null) {
+                if ($catchAjaxErrors === null) return $this->catchAjaxErrors;
+                $this->catchAjaxErrors = $catchAjaxErrors == true;
+                return $this;
+            }
+
+
+        /**
              * Allows you to run a callback with strict errors turned off.
              * Standard errors still apply, but this will use the default
              * error and exception handlers.
