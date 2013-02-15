@@ -2494,8 +2494,11 @@
                                     !ErrorHandler::isNonPHPRequest()
                                 )
                     ) {
+                        if ($this->errorPage[0] !== '/' && $this->errorPage[1] !== ':') {
+                            $this->errorPage = $this->applicationRoot . '/' . $this->errorPage;
+                        }
                         if ( file_exists($this->errorPage) ) {
-                            if (substr($this->errorPage, -4) === '.php' ) {
+                            if (in_array(substr($this->errorPage, -4), array('.php', '.phtml', '.inc'))) {
                                 include($this->errorPage);
                             } else {
                                 readfile($this->errorPage);
