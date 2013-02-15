@@ -1389,7 +1389,8 @@
             }
             
             
-            /** @return self */
+            /** Call without arguments to read the value setting, pass true/false to change it. 
+             * @return self */
             public function catchAjaxErrors($catchAjaxErrors = null) {
                 if ($catchAjaxErrors === null) return $this->catchAjaxErrors;
                 $this->catchAjaxErrors = $catchAjaxErrors == true;
