@@ -571,7 +571,7 @@
 
                 foreach ( $response as $key => $value ) {
                     if ( strtolower($key) === 'content-type' ) {
-                        $found = true;
+                        $found = false;
 
                         foreach ( ErrorHandler::$ALLOWED_RETURN_MIME_TYPES as $type ) {
                             if ( stripos($value, $type) !== false ) {
