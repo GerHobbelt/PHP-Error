@@ -1,0 +1,36 @@
+{
+	"name": "panrafal/php-error",
+	"description": "Better error reporting for PHP, and prettier too! Fork of original PHP-Error by Joseph Lenton better suited for production environments.",
+	"version": "1.0.0",
+	"homepage": "https://github.com/panrafal/PHP-Error",
+	"license": "BSD-3-Clause",
+	"require": {
+		"php": ">=5.3.0"
+	},
+	"repositories": [
+		{
+			"type": "git",
+			"url": "https://github.com/panrafal/PHP-Error"
+		}
+	],
+	"keywords": [
+		"php",
+		"error",
+		"reporting"
+	],
+	"authors": [
+		{
+			"name": "Joseph Lenton",
+			"homepage": "http://www.playmycode.com",
+			"role": "Developer"
+		},
+		{
+			"name": "Rafal Lindemann",
+			"homepage": "http://www.stamina.pl",
+			"role": "Developer"
+		}
+	],
+	"autoload": {
+		"files": ["src/php_error.php"]
+	}
+}
