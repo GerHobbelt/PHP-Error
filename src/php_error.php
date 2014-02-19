@@ -2427,8 +2427,10 @@
                         $this->isOn() 
                 ) {
                     
-                    /* Every broken page should have status 500 */
-                    header('HTTP/1.1 500 Internal Server Error');
+                    if (!self::isCLI()) {
+                        /* Every broken page should have status 500 */
+                        header('HTTP/1.1 500 Internal Server Error');
+                    }
                     
                     $outputSoFar = $this->discardBuffer(true);
                     
