@@ -164,9 +164,7 @@
              */
             $_php_error_is_ini_enabled =
                     ! @get_cfg_var( 'php_error.force_disabled' ) &&
-                    ! @get_cfg_var( 'php_error.force_disable'  ) &&
-                      @ini_get('display_errors') === '1'         &&
-                       PHP_SAPI !== 'cli'
+                    ! @get_cfg_var( 'php_error.force_disable'  )
             ;
         }
 
@@ -1505,7 +1503,7 @@
             }
 
 
-            /**
+        /**
              * Allows you to run a callback with strict errors turned off.
              * Standard errors still apply, but this will use the default
              * error and exception handlers.
@@ -1611,23 +1609,25 @@
                             @ini_set( 'output_buffering', 'on' );
                         }
 
-                    $output = '';
-                    $bufferOutput = true;
+	                    $output = '';
+	                    $bufferOutput = true;
 
-                    $this->bufferOutputStr  = &$output;
-                    $this->bufferOutput = &$bufferOutput;
+	                    $this->bufferOutputStr  = &$output;
+	                    $this->bufferOutput = &$bufferOutput;
 
-                    ob_start( function($string) use (&$output, &$bufferOutput) {
-                        if ( $bufferOutput ) {
-                            $output .= $string;
-                            return '';
-                        } else {
-                            $temp = $output . $string;
-                            $output = '';
-                            return $temp;
-                        }
-                    });
+	                    ob_start( function($string) use (&$output, &$bufferOutput) {
+	                        if ( $bufferOutput ) {
+	                            $output .= $string;
+	                            return '';
+	                        } else {
+	                            $temp = $output . $string;
+	                            $output = '';
+	                            return $temp;
+	                        }
+	                    });
 
+                    }
+		    
                     $self = $this;
                     register_shutdown_function( function() use ( $self ) {
                         $self->__onShutdown();
@@ -2573,7 +2573,7 @@
                 global $_php_error_is_ini_enabled;
                 if (
                         $_php_error_is_ini_enabled &&
-                        $this->isOn() && (
+                        $this->isOn() 
                 ) {
                     
                     if (!self::isCLI()) {
@@ -2656,7 +2656,7 @@
 
                                 $_SERVER
                         );
-                    $this->displayError( $message, $srcErrLine, $errFile, $errFileType, $stackTrace, $fileLinesSets, $numFileLines, $dump );
+                        $this->displayError( $message, $srcErrLine, $errFile, $errFileType, $stackTrace, $fileLinesSets, $numFileLines, $dump, $outputSoFar );
                         
                     } elseif ( $this->errorPage &&
                                 !$this->isDisplayingErrors() && 
