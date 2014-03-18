@@ -1,6 +1,6 @@
 {
 	"name": "joseph-lenton/php-error",
-	"description": "Better error reporting for PHP, and prettier too!",
+	"description": "Better error reporting for PHP, and prettier too! Fork of original PHP-Error by Joseph Lenton better suited for production environments.",
 	"version": "1.0.0",
 	"homepage": "https://github.com/JosephLenton/PHP-Error",
 	"license": "BSD-3-Clause",
@@ -22,6 +22,11 @@
 		{
 			"name": "Joseph Lenton",
 			"homepage": "http://www.playmycode.com",
+			"role": "Developer"
+		},
+		{
+			"name": "Rafal Lindemann",
+			"homepage": "http://www.stamina.pl",
 			"role": "Developer"
 		}
 	],

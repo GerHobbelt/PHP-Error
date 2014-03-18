@@ -1,6 +1,16 @@
 PHP Error | Improve Error Reporting for PHP
 ===========================================
 
+__This is a fork of original PHP-Error by Joseph Lenton better suited for production environments.__
+
+It gives you the power of catching crtical and trivial errors in a coherent way. You can log every error
+in your app, and show your users a meaningfull error page. At the same time, you can configure the server
+to show you, the developer, full stack trace and all other PHP-Error goodness.
+
+The fork was done before Joseph added ACE remote file editing, and it will be kept this way.
+
+---------------------
+
 PHP errors are not good enough for development, it's as simple as that. This aims to solve this.
 
 ![Better Error Message](http://i.imgur.com/1G77I.png)

@@ -90,7 +90,8 @@
 
     namespace php_error;
 
-    use \php_error\FileLinesSet,
+    use \php_error\ErrorException,
+        \php_error\FileLinesSet,
         \php_error\ErrorHandler,
 
         \php_error\JSMin,
@@ -577,6 +578,10 @@
 
             private $customData = array();
 
+            protected static $ALLOWED_OUTPUT_BUFFERS = array(
+                'ob_gzhandler', 'zlib output compression'
+            );
+            
             private static function isIIS() {
                 return (
                                 isset($_SERVER['SERVER_SOFTWARE']) &&
@@ -585,6 +590,10 @@
                                 isset($_SERVER['_FCGI_X_PIPE_']) &&
                                 strpos($_SERVER['_FCGI_X_PIPE_'], 'IISFCGI') !== false
                         );
+            }
+
+            public static function isCLI() {
+                return PHP_SAPI === 'cli';
             }
 
             private static function isBinaryRequest() {
@@ -1193,6 +1202,14 @@
 
             private $classNotFoundException;
 
+            private $throwErrors;
+            private $callbacks = array();
+            private $errorPage;
+            private $errorLog;
+            private $errorLogFormat;
+            private $errorLogTimeFormat;
+            
+            
             /**
              * = Options =
              *
@@ -1261,6 +1278,29 @@
              *
              *  - show_error_code           Can be true or false. When true php error codes are shown in the actual error message.
              *                              Defaults to false.
+             * 
+             *  - throw_errors              By default, PHP Error will stop execution on trigerred errors.
+             *                              You can enabled it to throw errors instead.
+             *  - error_page                Error page to show if display_errors is disabled.
+             *                              Should be an absolute path to .html or .php file
+             * 
+             *  - error_log                 Defines where to log messages.
+             *                              FALSE - disables logging
+             *                              0 - logs to the syslog, equivalent of php's error_log($message, 0) (default)
+             *                              absolute path - logs to the provided file path, equivalent of php's error_log($message, 3, $path)
+             *                              email - sends an email, equivalent of php's error_log($message, 1, $email)
+             * 
+             *  - error_log_format          Format of log messages with printf() directives.
+             *                              %1$s - timestamp (empty if error_log is set to 0, because syslog is using it's own timestamp)
+             *                              %2$s - error message
+             *                              %3$s - file
+             *                              %4$s - line
+             *                              %5$s - stack trace (starts on the newline and is indented)
+             *                              Defaults to "%s%s\n           %s, %s %s"
+             *                              
+             *  - error_log_time_format     Format of log's timestamp compatible with strftime()
+             *                              Defaults to "[%c] "
+             * 
              * @param options Optional, an array of values to customize this handler.
              * @throws Exception This is raised if given an options that does *not* exist (so you know that option is meaningless).
              */
@@ -1302,7 +1342,7 @@
                 $this->defaultErrorReportingOff = ErrorHandler::optionsPop( $options, 'error_reporting_off' , error_reporting()         );
 
                 $this->applicationRoot          = ErrorHandler::optionsPop( $options, 'application_root'    , $_SERVER['DOCUMENT_ROOT'] );
-                $this->serverName               = ErrorHandler::optionsPop( $options, 'server_name'         , $_SERVER['SERVER_NAME']   );
+                $this->serverName               = ErrorHandler::optionsPop( $options, 'server_name', isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : null  );
                 $this->showErrorCode            = ErrorHandler::optionsPop( $options, 'show_error_code'         , false);
 
                 /*
@@ -1325,6 +1365,13 @@
                 $this->displayLineNumber        = ErrorHandler::optionsPop( $options, 'display_line_numbers'  , true );
 
                 $this->htmlOnly                 = !! ErrorHandler::optionsPop( $options, 'html_only', true );
+                
+                $this->throwErrors              = !! ErrorHandler::optionsPop( $options, 'throw_errors', false );
+                $this->errorPage                = ErrorHandler::optionsPop( $options, 'error_page', false );
+
+                $this->errorLog                 = ErrorHandler::optionsPop( $options, 'error_log', 0 );
+                $this->errorLogFormat           = ErrorHandler::optionsPop( $options, 'error_log_format', "%s%s\n           %s, %s %s");
+                $this->errorLogTimeFormat       = ErrorHandler::optionsPop( $options, 'error_log_time_format', '[%c] ' );
 
                 $this->classNotFoundException   = null;
 
@@ -1361,6 +1408,15 @@
                 $this->startBuffer();
             }
 
+            /** 
+             * Returns current global handler, or null if there is none.
+             * 
+             * @return ErrorHandler */
+            public static function globalHandler() {
+                global $_php_error_global_handler;
+                return $_php_error_global_handler;
+            }
+            
             /*
              * --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
              * Public Functions
@@ -1434,6 +1490,20 @@
 
                 return $this;
             }
+
+            public function isDisplayingErrors() {
+                return ini_get('display_errors') === '1';
+            }
+            
+            
+            /** Call without arguments to read the value setting, pass true/false to change it. 
+             * @return self */
+            public function catchAjaxErrors($catchAjaxErrors = null) {
+                if ($catchAjaxErrors === null) return $this->catchAjaxErrors;
+                $this->catchAjaxErrors = $catchAjaxErrors == true;
+                return $this;
+            }
+
 
             /**
              * Allows you to run a callback with strict errors turned off.
@@ -1533,12 +1603,13 @@
                 if ( $_php_error_is_ini_enabled && !$this->isBufferSetup ) {
                     $this->isBufferSetup = true;
 
-                    ini_set( 'implicit_flush', false );
-                    ob_implicit_flush( false );
+                    if (self::isCLI() == false) {
+                        ini_set( 'implicit_flush', false );
+                        ob_implicit_flush( false );
 
-                    if ( ! @ini_get('output_buffering') ) {
-                        @ini_set( 'output_buffering', 'on' );
-                    }
+                        if ( ! @ini_get('output_buffering') ) {
+                            @ini_set( 'output_buffering', 'on' );
+                        }
 
                     $output = '';
                     $bufferOutput = true;
@@ -1565,33 +1636,43 @@
             }
 
             /**
-             * Turns off buffering, and discards anything buffered
-             * so far.
+             * Discards anything buffered so far.
+             * 
+             * Will preserve output compression handlers.
              *
              * This will return what has been buffered incase you
              * do want it. However otherwise, it will be lost.
              */
-            private function discardBuffer() {
-                $str = $this->bufferOutputStr;
+            public function discardBuffer($return = false) {
+                if (!$this->isBufferSetup || self::isCLI()) return false;
+                
+                $content  = ob_get_contents();
+                $handlers = ob_list_handlers();
+                
+                /* Flushing buffers may result in errors, so lets get their contents
+                 * in reverse order... */
+                $content = false;
+                for ( $i = count($handlers)-1; $i >= 0; $i-- ) {
+                    $handler = $handlers[$i];
 
-                $this->bufferOutputStr = '';
-                $this->bufferOutput = false;
-
-                return $str;
+                    if ( in_array($handler, self::$ALLOWED_OUTPUT_BUFFERS) ) {
+                        // these buffers are safe to stay...
+                        break;
+                    } else {
+                        if ($return) {
+                            $content = ob_get_clean() . $content;
+                        } else {
+                            ob_end_clean();
+                        }
+                    }
+                }                
+                
+                // restart buffering
+                ob_start();
+                
+                return $content;
             }
 
-            /**
-             * Flushes the internal buffer,
-             * outputting what is left.
-             *
-             * @param append Optional, extra content to append onto the output buffer.
-             */
-            private function flushBuffer() {
-                $temp = $this->bufferOutputStr;
-                $this->bufferOutputStr = '';
-
-                return $temp;
-            }
 
             /**
              * This will finish buffering, and output the page.
@@ -1603,7 +1684,7 @@
              * then this will do nothing (as no buffering will take place).
              */
             public function endBuffer() {
-                if ( $this->isBufferSetup ) {
+                if ( $this->isBufferSetup && self::isCLI() == false ) {
                     $content  = ob_get_contents();
                     $handlers = ob_list_handlers();
 
@@ -2400,17 +2481,25 @@
             }
 
             private function logError( $message, $file, $line, $ex=null ) {
+                if ($this->errorLog === false || !$this->errorLogFormat) return;
+                
+                $string = "";
+                $trace = "";
                 if ( $ex ) {
                     $trace = $ex->getTraceAsString();
                     $parts = explode( "\n", $trace );
-                    $trace = "        " . join( "\n        ", $parts );
-
-                    if ( ! ErrorHandler::isIIS() ) {
-                        error_log( "$message \n           $file, $line \n$trace" );
-                    }
-                } else {
-                    if ( ! ErrorHandler::isIIS() ) {
-                        error_log( "$message \n           $file, $line" );
+                    $trace = PHP_EOL . "        " . join( PHP_EOL . "        ", $parts );
+                }
+                $string = sprintf($this->errorLogFormat, $this->errorLog !== 0 ? strftime($this->errorLogTimeFormat) : '', $message, $file, $line, $trace);
+                if ($this->errorLog) $string .= PHP_EOL;
+                
+                if ( ! ErrorHandler::isIIS() ) {
+                    if (is_numeric($this->errorLog)) {
+                        error_log( $string, $this->errorLog );
+                    } elseif (dirname($this->errorLog) && is_dir(dirname($this->errorLog))) {
+                        error_log( $string, 3, $this->errorLog);
+                    } elseif (strpos($this->errorLog, '@') > 0) {
+                        error_log( $string, 1, $this->errorLog );
                     }
                 }
             }
@@ -2451,7 +2540,6 @@
              * more than that.
              */
             public function reportError( $code, $message, $errLine, $errFile, $ex=null ) {
-                $this->discardBuffer();
 
                 if (
                         $ex === null &&
@@ -2471,60 +2559,87 @@
 
                 $this->logError( $message, $errFile, $errLine, $ex );
 
+                if ($this->triggerCallback( $code, $message, $errLine, $errFile, $ex )) {
+                    // exit in order to end processing
+                    $this->turnOff();
+                    exit(0);
+                }
+                
                 /**
                  * It runs if:
                  *  - it is globally enabled
                  *  - this error handler is enabled
-                 *  - we believe it is a regular html request, or ajax
                  */
                 global $_php_error_is_ini_enabled;
                 if (
                         $_php_error_is_ini_enabled &&
-                        ($this->isOn() || $this->allowManualReport) && (
+                        $this->isOn() && (
+                ) {
+                    
+                    if (!self::isCLI()) {
+                        /* Every broken page should have status 500 */
+                        header('HTTP/1.1 500 Internal Server Error');
+                    }
+                    
+                    $outputSoFar = $this->discardBuffer(true);
+                    
+                    /**
+                     * Error is displayed if:
+                     *  - display_errors is 1
+                     *  - we believe it is a regular html request, or ajax
+                     */
+                    if ($this->isDisplayingErrors() && (
                                 $this->isAjax ||
                                 !$this->htmlOnly ||
                                 !ErrorHandler::isNonPHPRequest()
                         )
-                ) {
-                    $root = $this->applicationRoot;
+                    ) {
+                    
+                        $root = $this->applicationRoot;
 
-                    list( $ex, $stackTrace, $code, $errFile, $errLine ) =
-                            $this->getStackTrace( $ex, $code, $errFile, $errLine );
+                        list( $ex, $stackTrace, $code, $errFile, $errLine ) =
+                                $this->getStackTrace( $ex, $code, $errFile, $errLine );
+                    
+                        list( $message, $srcErrFile, $srcErrLine, $altInfo ) =
+                                $this->improveErrorMessage(
+                                        $ex,
+                                        $code,
+                                        $message,
+                                        $errLine,
+                                        $errFile,
+                                        $root,
+                                        $stackTrace
+                                );
 
-                    list( $message, $srcErrFile, $srcErrLine, $altInfo ) =
-                            $this->improveErrorMessage(
-                                    $ex,
-                                    $code,
-                                    $message,
-                                    $errLine,
-                                    $errFile,
-                                    $root,
-                                    $stackTrace
-                            );
+                        $errFile = $srcErrFile;
+                        $errLine = $srcErrLine;
 
-                    $errFile = $srcErrFile;
-                    $errLine = $srcErrLine;
+                        if (self::isCLI()) {
+                            // it is not needed, since PHP will print out to stderr. maybe later...
+                            //$this->displayCLIError($message, $errFile, $errLine, $stackTrace);
+                            exit($code);
+                        }
+                    
+                        list( $fileLinesSets, $numFileLines ) = $this->generateFileLineSets( $srcErrFile, $srcErrLine, $stackTrace );
 
-                    list( $fileLinesSets, $numFileLines ) = $this->generateFileLineSets( $srcErrFile, $srcErrLine, $stackTrace );
+                        list( $type, $errFile ) = $this->getFolderType( $root, $errFile );
+                        $errFileType = ErrorHandler::folderTypeToCSS( $type );
 
-                    list( $type, $errFile ) = $this->getFolderType( $root, $errFile );
-                    $errFileType = ErrorHandler::folderTypeToCSS( $type );
-
-                    $stackTrace = $this->parseStackTrace( $code, $message, $errLine, $errFile, $stackTrace, $root, $altInfo );
-                    $fileLines  = $this->readCodeFile( $srcErrFile, $srcErrLine );
+                        $stackTrace = $this->parseStackTrace( $code, $message, $errLine, $errFile, $stackTrace, $root, $altInfo );
+                        $fileLines  = $this->readCodeFile( $srcErrFile, $srcErrLine );
 
                     // load the session, if ...
                     //  - there *is* a session cookie to load
                     //  - the session has not yet been started
                     // Do not start the session without he cookie, because there may be no session ever.
                     if ( isset($_COOKIE[session_name()]) && session_id() === '' ) {
-                        session_start();
-                    }
+                            if(session_id() === ''){ session_start(); }
+                        }
 
                     $arrays = array(
-                        'post'    => ( isset($_POST)    ? $_POST    : array() ),
-                        'get'     => ( isset($_GET)     ? $_GET     : array() ),
-                        'session' => ( isset($_SESSION) ? $_SESSION : array() ),
+                                    'post'    => ( isset($_POST)    ? $_POST    : array() ),
+                                    'get'     => ( isset($_GET)     ? $_GET     : array() ),
+                                    'session' => ( isset($_SESSION) ? $_SESSION : array() ),
                         'cookies' => ( isset($_COOKIE)  ? $_COOKIE  : array() ),
                     );
 
@@ -2536,16 +2651,38 @@
                     $dump = $this->generateDumpHTML(
                             $arrays,
 
-                            $request,
-                            $response,
+                                $request,
+                                $response,
 
-                            $_SERVER
-                    );
-                    $this->displayError( $message, $srcErrLine, $errFile, $errFileType, $stackTrace, $fileLinesSets, $numFileLines, $dump, $code );
-
+                                $_SERVER
+                        );
+                    $this->displayError( $message, $srcErrLine, $errFile, $errFileType, $stackTrace, $fileLinesSets, $numFileLines, $dump );
+                        
+                    } elseif ( $this->errorPage &&
+                                !$this->isDisplayingErrors() && 
+                                !$this->isAjax &&
+                                (
+                                    !$this->htmlOnly ||
+                                    !ErrorHandler::isNonPHPRequest()
+                                )
+                    ) {
+                        if ($this->errorPage[0] !== '/' && $this->errorPage[1] !== ':') {
+                            $this->errorPage = $this->applicationRoot . '/' . $this->errorPage;
+                        }
+                        if ( file_exists($this->errorPage) ) {
+                            if (in_array(substr($this->errorPage, -4), array('.php', '.phtml', '.inc'))) {
+                                include($this->errorPage);
+                            } else {
+                                readfile($this->errorPage);
+                            }
+                        } else {
+                            echo '!';
+                        }
+                    }
+                    
                     // exit in order to end processing
                     $this->turnOff();
-                    exit(0);
+                    exit($code);
                 }
             }
 
@@ -2558,6 +2695,32 @@
                 return $this;
             }
 
+            protected function triggerCallback( $code, $message, $errLine, $errFile, $ex=null ) {
+                foreach($this->callbacks as $callback) {
+                    if (call_user_func_array($callback, func_get_args())) return true;
+                }
+            }
+            
+            /** Adds a callback that will be called just right after logging 
+             * 
+             * Callback will receive the same arguments as reportError:
+             * callback($code, $message, $errLine, $errFile, $ex)
+             * 
+             * If the callback returns anything, no other callback will be called and the script
+             * will exit before displaying the error.
+             * 
+             */
+            public function addErrorCallback($callback) {
+                if (is_callable($callback) == false) throw new Exception('Callback not callable!');
+                $this->callbacks[] = $callback;
+            }
+            
+            public function removeErrorCallback($callback) {
+                $key = array_search($callback, $this->callbacks, true);
+                if ($key === false) throw new Exception('Callback not set!');
+                unset($this->callbacks[$key]);
+            }
+            
             private function getStackTrace( $ex, $code, $errFile, $errLine ) {
                 $stackTrace = null;
 
@@ -2764,7 +2927,6 @@
 
                     // all errors \o/ !
                     error_reporting( $this->defaultErrorReportingOn );
-                    @ini_set( 'html_errors', false );
 
                     if ( ErrorHandler::isIIS() ) {
                         @ini_set( 'log_errors', false );
@@ -2785,12 +2947,20 @@
                                  */
                                 if ( $self->isOn() ) {
                                     /*
+                                     * Turning off 'html_errors' at this point avoids interference 
+                                     * with xDebugs 'var_dump()'-overload, thus preserving prettyfied dumps
+                                     */
+                                    @ini_set( 'html_errors', false );
+                                    /*
                                      * When using an @, the error reporting drops to 0.
                                      */
                                     if ( error_reporting() !== 0 || $catchSurpressedErrors ) {
                                         $ex = new \ErrorException( $message, $code, 0, $file, $line );
-
-                                        $self->reportException( $ex );
+                                        if ($self->throwErrors) {
+                                            throw $ex;
+                                        } else {
+                                            $self->reportException( $ex );
+                                        }
                                     }
                                 } else {
                                     return false;
@@ -2801,6 +2971,11 @@
 
                     set_exception_handler( function($ex) use ( $self ) {
                         if ( $self->isOn() ) {
+                            /*
+                             * Turning off 'html_errors' at this point avoids interference 
+                             * with xDebugs 'var_dump()'-overload, thus preserving prettyfied dumps
+                             */
+                            @ini_set( 'html_errors', false );
                             $self->reportException( $ex );
                         } else {
                             return false;
@@ -2868,417 +3043,40 @@
                 }
             }
 
-            private function displayJSInjection() {
+            private function getJSInjection() {
                 if (defined('PHPERROR_WRAP_AJAX') && PHPERROR_WRAP_AJAX) {
-                ?><script data-php_error="magic JS, just ignore this!">
-                    "use strict";
+                return '<script data-php_error="magic JS, just ignore this!">' 
+                        . file_get_contents(__DIR__ . '/injection.min.js')
+                        . '</script>';
+            }
 
-                    (function( window ) {
-                        if ( window.XMLHttpRequest ) {
-                            /**
-                             * A method wrapping helper function.
-                             *
-                             * Wraps the method given, from the old prototype to the new
-                             * XMLHttpRequest prototype.
-                             *
-                             * This only happens if the old one actually has that prototype.
-                             * If the browser doesn't support a prototype, then it doesn't
-                             * get wrapped.
-                             */
-                            var wrapMethod = function( XMLHttpRequest, old, prop ) {
-                                if ( old.prototype[prop] ) {
-                                    var behaviours = ( arguments.length > 3 ) ?
-                                            Array.prototype.slice.call( arguments, 3 ) :
-                                            null ;
-
-                                    XMLHttpRequest.prototype[prop] = function() {
-                                        if ( behaviours !== null ) {
-                                            for ( var i = 0; i < behaviours.length; i++ ) {
-                                                behaviours[i].call( this, arguments, prop );
-                                            }
-                                        }
-
-                                        return this.__.inner[prop].apply( this.__.inner, arguments );
-                                    };
-                                }
-                            }
-
-                            var postMethod = function( XMLHttpRequest, prop ) {
-                                if ( XMLHttpRequest.prototype[prop] ) {
-                                    var behaviours = Array.prototype.slice.call( arguments, 2 );
-
-                                    var previous = XMLHttpRequest.prototype[prop];
-                                    XMLHttpRequest.prototype[prop] = function() {
-                                        var r = previous.apply( this, arguments );
-
-                                        for ( var i = 0; i < behaviours.length; i++ ) {
-                                            behaviours[i].call( this, arguments, prop );
-                                        }
-
-                                        return r;
-                                    };
-                                }
-                            }
-
-                            /*
-                             * Certain properties will error when read,
-                             * and which ones do vary from browser to browser.
-                             *
-                             * I've found both Chrome and Firefox will error
-                             * on _different_ properties.
-                             *
-                             * So every read needs to be wrapped in a try/catch,
-                             * and just hope it doesn't error.
-                             */
-                            var copyProperties = function( src, dest, props ) {
-                                for ( var i = 0; i < props.length; i++ ) {
-                                    try {
-                                        var prop = props[i];
-                                        dest[prop] = src[prop];
-                                    } catch( ex ) { }
-                                }
-                            };
-
-                            var copyResponseProperties = function( src, dest ) {
-                                copyProperties( src, dest, [
-                                        'response',
-                                        'responseText',
-                                        'responseXML'
-                                ]);
-                            }
-
-                            var copyRequestProperties = function( src, dest, includeReadOnly, skipResponse ) {
-                                copyProperties( src, dest, [
-                                        'readyState',
-                                        'timeout',
-                                        'upload',
-                                        'withCredentials',
-                                        'responseType',
-
-                                        'mozBackgroundRequest',
-                                        'mozArrayBuffer',
-                                        'multipart'
-                                ]);
-
-                                if ( includeReadOnly ) {
-                                    copyProperties( src, dest, [
-                                            'status',
-                                            'statusText',
-                                            'channel'
-                                    ]);
-
-                                    if ( ! skipResponse ) {
-                                        copyResponseProperties( src, dest );
-                                    }
-                                }
-
-                                return dest;
-                            }
-
-                            var runFail = function( ev ) {
-                                var self = this;
-                                var xmlHttpRequest = this.__.inner;
-
-                                var iframe = document.createElement('iframe');
-                                iframe.setAttribute('width', '100%');
-                                iframe.setAttribute('height', '100%');
-                                iframe.setAttribute('src', 'about:blank');
-
-                                iframe.style.transition =
-                                iframe.style.OTransition =
-                                iframe.style.MsTransition =
-                                iframe.style.MozTransition =
-                                iframe.style.WebkitTransition = 'opacity 200ms linear';
-
-                                iframe.style.background = 'transparent';
-                                iframe.style.opacity = 0;
-                                iframe.style.zIndex = 100001;
-                                iframe.style.top = 0;
-                                iframe.style.right = 0;
-                                iframe.style.left = 0;
-                                iframe.style.bottom = 0;
-                                iframe.style.position = 'fixed';
-
-                                var response = xmlHttpRequest.responseText;
-
-                                iframe.onload = function() {
-                                    var iDoc = iframe.contentWindow || iframe.contentDocument;
-                                    if ( iDoc.document) {
-                                        iDoc = iDoc.document;
-                                    }
-
-                                    var iBody = iDoc.getElementsByTagName("body")[0];
-                                    iBody.innerHTML = response;
-                                    var iHead = iDoc.getElementsByTagName("head")[0];
-
-                                    // re-run the script tags
-                                    var scripts = iDoc.getElementsByTagName('script');
-                                    for ( var i = 0; i < scripts.length; i++ ) {
-                                        var script = scripts[i];
-                                        var parent = script.parentNode;
-
-                                        if ( parent ) {
-                                            parent.removeChild( script );
-
-                                            var newScript = iDoc.createElement('script');
-                                            newScript.innerHTML = script.innerHTML;
-
-                                            iHead.appendChild( newScript );
-                                        }
-                                    }
-
-                                    var closed = false;
-                                    var closeIFrame = function() {
-                                        if ( ! closed ) {
-                                            closed = true;
-
-                                            iframe.style.opacity = 0;
-
-                                            setTimeout( function() {
-                                                iframe.parentNode.removeChild( iframe );
-                                            }, 220 );
-                                        }
-                                    }
-
-                                    /*
-                                     * Retry Handler.
-                                     *
-                                     * Clear this, make a new (real) XMLHttpRequest,
-                                     * and then re-run everything.
-                                     */
-                                    var retry = iDoc.getElementById('ajax-retry');
-                                    if ( retry ) {
-                                        var retryFun = function() {
-                                            var methodCalls = self.__.methodCalls;
-
-                                            initializeXMLHttpRequest.call( self );
-                                            for ( var i = 0; i < methodCalls.length; i++ ) {
-                                                var method = methodCalls[i];
-                                                self[method.method].apply( self, method.args );
-                                            }
-
-                                            closeIFrame();
-
-                                            return false;
-                                        };
+            private function displayCLIError($message, $errFile, $errLine, $stackTrace) {
+                $unhtml = function($html) {
+                    return html_entity_decode( preg_replace('/<.+?>/', '', $html) );
+                                        retry.onclick = function() {
+                };
                                         retry.onclick = retryFun;
 
                                         iframe.__php_error_retry = retryFun;
-
-                                        /*
-                                         * The close handler.
-                                         *
-                                         * When closed, the response is cleared,
-                                         * and then the request finishes with null info.
-                                         */
-                                        iDoc.getElementById('ajax-close').onclick = function() {
-                                            copyRequestProperties( self.__.inner, self, true );
-
-                                            // clear the response
-                                            self.response       = '';
-                                            self.responseText   = '';
-                                            self.responseXML    = null;
-
-                                            if ( self.onreadystatechange ) {
-                                                self.onreadystatechange( ev );
-                                            }
-
-                                            closeIFrame();
-                                            return false;
-                                        };
-
-                                        var html = iDoc.getElementsByTagName('html')[0];
-                                        html.setAttribute( 'class', 'ajax' );
-
-                                        setTimeout( function() {
-                                            iframe.style.opacity = 1;
-                                        }, 1 );
-                                    }
-                                }
-
-                                /*
-                                 * Placed inside a timeout, incase the document doesn't exist yet.
-                                 *
-                                 * Can happen if the page ajax's straight away.
-                                 */
-                                setTimeout( function() {
-                                    var body = document.getElementsByTagName('body')[0];
-                                    body.appendChild( iframe );
-                                }, 1 );
-                            }
-
-                            var old = window.XMLHttpRequest;
-
-                            /**
-                             * The middle man http request object.
-                             *
-                             * Acts just like a normal one, but will show errors if they
-                             * occur instead of running the result.
-                             */
-                            var XMLHttpRequest = function() {
-                                initializeXMLHttpRequest.call( this );
-                            }
-
-                            var initializeXMLHttpRequest = function() {
-                                var self = this,
-                                    inner = new old();
-
-                                /**
-                                 * With a buggy XMLHttpRequest, it's possible to accidentally run the error handler
-                                 * multiple times.
-                                 *
-                                 * This is a flag to only do it once, to keep the code more defensive.
-                                 */
-                                var errorOnce   = true,
-                                    isAjaxError = false;
-
-                                var stateResults = [];
-
-                                inner.onreadystatechange = function( ev ) {
-                                    copyRequestProperties( inner, self, true, true );
-
-                                    var state = inner.readyState;
-
-                                    /*
-                                     * Check headers for error.
-                                     */
-                                    if ( ! isAjaxError && state >= 4 ) {
-                                        /*
-                                         * It's null in some browsers, and an empty string in others.
-                                         */
-                                        var header = inner.getResponseHeader( '<?php echo ErrorHandler::PHP_ERROR_MAGIC_HEADER_KEY ?>' );
-
-                                        if ( header !== null && header !== '' ) {
-                                            self.__.isAjaxError = true;
-                                            isAjaxError = true;
-                                        }
-                                    }
-
+                $message = $unhtml($message);
+                
+                echo "\n\n-----------------------------------------------------------\n";
+                echo "$message\n";
+                foreach($stackTrace as $i => $stack) {
+                    echo "\t #$i ";
+                    if (isset($stack['file'])) {
+                        echo $stack['file'];
+                        if (isset($stack['line'])) echo "(", $stack['line'], ")";
+                        echo ": ";
                                     if ( ! isAjaxError && state >= 2 ) {
-                                        copyResponseProperties( inner, self );
-                                    }
-
-                                    /*
-                                     * Success ! \o/
-                                     *
-                                     * Pass any state change on to the parent caller,
-                                     * unless we hit an ajaxy error.
-                                     */
-                                    if ( !isAjaxError && self.onreadystatechange ) {
-                                        /*
-                                         * One of three things happens:
-                                         *  = cache the requests until we know there is no error (state 4)
-                                         *  = we know there is no error, and so we run our cache
-                                         *  = cache is done, but we've been called again, so just pass it on
-                                         */
-                                        if ( state < 4 ) {
-                                            stateResults.push( copyRequestProperties(self, {}, true) );
-                                        } else {
-                                            if ( stateResults !== null ) {
-                                                var currentState = copyRequestProperties( self, {}, true );
-
-                                                for ( var i = 0; i < stateResults.length; i++ ) {
-                                                    var store = stateResults[i];
-                                                    copyRequestProperties( store, self, true );
-
-                                                    // must check a second time here,
-                                                    // in case it gets changed within an onreadystatechange
-                                                    if ( self.onreadystatechange ) {
-                                                        self.onreadystatechange( ev );
-                                                    }
-                                                }
-
-                                                copyRequestProperties( currentState, self, true );
-                                                stateResults = null;
-                                            }
-
-                                            if ( self.onreadystatechange ) {
-                                                self.onreadystatechange( ev );
-                                            }
-                                        }
-                                    }
-
-                                    /*
-                                     * Fail : (
-                                     */
-                                    if (
-                                            isAjaxError &&
-                                            state === 4 &&
-                                            errorOnce
-                                    ) {
-                                        errorOnce = false;
-                                        if ( window.console && window.console.log ) {
-                                            window.console.log( 'Ajax Error Calling: ' + self.__.url );
-                                        }
-
-                                        runFail.call( self, ev );
-                                    }
-                                };
-
-                                copyRequestProperties( inner, this, true );
-
-                                /*
-                                 * Private fields are stored underneath the unhappy face,
-                                 * to localize them.
-                                 *
-                                 * Access becomes:
-                                 *  this.__.fieldName
-                                 */
-                                this.__ = {
-                                        methodCalls: [],
-                                        inner: inner,
-                                        isAjaxError: false,
-                                        isSynchronous: false,
-                                        url: ''
-                                };
-                            }
-
-                            /*
-                             * We build the methods for the fake XMLHttpRequest.
-                             */
-
-                            var copyIn = function() {
-                                copyRequestProperties( this, this.__.inner );
-                            }
-                            var copyOut = function() {
-                                copyRequestProperties( this.__.inner, this, true, this.__.isSynchronous && this.__.isAjaxError );
-                            }
-                            var addHeader = function() {
-                                this.__.inner.setRequestHeader( 'HTTP_X_REQUESTED_WITH', 'XMLHttpRequest' );
-                            }
-                            var isSynchronous = function( args ) {
-                                this.__.isSynchronous = ( args[2] === false );
-                            }
-                            var saveRequest = function( args, method ) {
-                                this.__.methodCalls.push({
-                                    method: method,
-                                    args: args
-                                });
-                            }
-                            var grabOpen = function( args, method ) {
-                                this.__.url = args[1];
-                            }
-
-                            wrapMethod( XMLHttpRequest, old, 'open'        , saveRequest, copyIn, isSynchronous, grabOpen );
-                            wrapMethod( XMLHttpRequest, old, 'abort'       , saveRequest, copyIn );
-                            wrapMethod( XMLHttpRequest, old, 'send'        , saveRequest, copyIn, addHeader );
-                            wrapMethod( XMLHttpRequest, old, 'sendAsBinary', saveRequest, copyIn, addHeader );
-
-                            postMethod( XMLHttpRequest,      'send'        , copyOut );
-                            postMethod( XMLHttpRequest,      'sendAsBinary', copyOut );
-
-                            wrapMethod( XMLHttpRequest, old, 'getAllResponseHeaders', saveRequest );
-                            wrapMethod( XMLHttpRequest, old, 'getResponseHeader'    , saveRequest );
-                            wrapMethod( XMLHttpRequest, old, 'setRequestHeader'     , saveRequest );
-                            wrapMethod( XMLHttpRequest, old, 'overrideMimeType'     , saveRequest );
-
-                            window.XMLHttpRequest = XMLHttpRequest;
-                        }
-                    })( window );
-                </script><?php
+                    }
+                    if (isset($stack['class'])) echo $stack['class'], "::";
+                    if (isset($stack['function'])) echo $stack['function'], "()";
+                    echo "\n";
+                }                
                 }
             }
-
+            
             /**
              * The actual display logic.
              * This outputs the error details in HTML.
@@ -3384,9 +3182,18 @@
                             if ( $stackTrace !== null ) {
                                 echo $stackTrace;
                             }
-
+                            
                             if ( $dumpInfo !== null ) {
                                 echo $dumpInfo;
+                            }
+                            
+                            if ($outputSoFar) {
+                                ?>
+                                <h2 id="error-output-title">output</h2>
+                                <div id="error-output">
+                                    <?php echo htmlspecialchars($outputSoFar) ?>
+                                </div>
+                                <?php
                             }
                         },
 
@@ -3396,6 +3203,7 @@
                          */
                         function() use ( $saveUrl ) {
                             ?><script>
+                                <?php readfile(__DIR__ . '/php_error.js') ?>
                                 "use strict";
 
                                 $(document).ready( function() {
@@ -3602,6 +3410,7 @@
                 echo "<link href='http://fonts.googleapis.com/css?family=Droid+Sans+Mono' rel='stylesheet' type='text/css'>";
 
                 ?><style>
+                    <?php readfile(__DIR__ . '/php_error.css'); ?>
                     html, body {
                         margin: 0;
                         padding: 0;
@@ -4902,3 +4711,4 @@
             }
         }
     }
+
